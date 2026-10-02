@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Oylamalı Konu Platformu</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f6f7f9;--fg:#1b1f24;--card:#fff;--m:#667085;--ac:#2f5496;--ok:#1a7f4b;--bad:#b3261e;--bd:#d9dde3}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171c;--fg:#e6e8eb;--card:#1e2229;--m:#9aa3b0;--ac:#7aa2f7;--ok:#4cc38a;--bad:#f2837c;--bd:#323944}}
+:root[data-theme="dark"]{--bg:#14171c;--fg:#e6e8eb;--card:#1e2229;--m:#9aa3b0;--ac:#7aa2f7;--ok:#4cc38a;--bad:#f2837c;--bd:#323944}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:860px;margin:0 auto;padding:12px}
+h1{font-size:20px;margin:6px 0}h4{margin:12px 0 4px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;margin:10px 0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.m{color:var(--m);font-size:13px}
+.b{font-size:12px;border:1px solid var(--bd);border-radius:20px;padding:1px 8px}
+.ok{color:var(--ok);border-color:var(--ok)}.bad{color:var(--bad);border-color:var(--bad)}
+input,select,textarea,button{font:inherit;color:var(--fg);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:6px 10px;max-width:100%}
+textarea{width:100%;min-height:50px;margin:6px 0}
+button{cursor:pointer}button.p{background:var(--ac);color:#fff;border-color:var(--ac)}
+.tabs{display:flex;gap:6px;margin:8px 0}.tabs button.on{background:var(--ac);color:#fff}
+.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
+.vp{border-left:3px solid var(--ac);padding:4px 10px;margin:8px 0}
+.cm{border-top:1px solid var(--bd);padding:6px 0}
+.hide{font-style:italic;color:var(--m)}
+.led{font:12px ui-monospace,monospace;word-break:break-all;border-top:1px solid var(--bd);padding:4px 0}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));background:#222;color:#fff;padding:8px 14px;border-radius:8px;display:none;max-width:90%;z-index:9}
+</style>
+</head>
+<body>
+<main id="app"></main>
+<div id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const norm=s=>s.replace(/İ/g,'i').replace(/I/g,'ı').toLowerCase().replace(/\s+/g,' ').trim();
+const tr=k=>k=='ULUSAL'?'Ulusal (herkes oy verir)':'Bölgesel: '+k[0].toLocaleUpperCase('tr')+k.slice(1)+' sakinleri';
+async function sha(t){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(t));return[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
+// Yönetmelik/ontoloji: 1 = silme gerekçesi olabilir, 0 = korunan çekirdek ilke
+const KAT={HAKARET:1,KISISEL_VERI_IFSASI:1,SPAM:1,NEFRET_SOYLEMI:1,SIDDETE_TESVIK:1,ELESTIRI:0,AZINLIK_GORUSU:0,UNPOPULER_GORUS:0};
+const HK=['aptal','salak','gerizekalı','şerefsiz'];
+const KEY='oylamali_platform_v1';
+const fresh=()=>({users:[],topics:[],votes:[],ledger:[],tuz:Math.random().toString(36).slice(2)+Date.now(),n:1,cur:null,tab:'kisi'});
+let S=fresh();
+try{const r=localStorage.getItem(KEY);if(r)S=JSON.parse(r)}catch(e){}
+const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}};
+const cur=()=>S.users.find(u=>u.id==S.cur);
+const gv=id=>S.votes.find(v=>v.id==id),gt=id=>S.topics.find(t=>t.id==id);
+const sec=(u,k)=>k=='ULUSAL'||k==u.il;
+function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display='none',4500)}
+async function run(f){try{await f()}catch(e){toast(typeof e=='string'?e:e.message)}}
+
+// ---- defter (hash zinciri, sadece ekleme) ----
+const Z='0'.repeat(64);
+async function led(tur,veri){const o=S.ledger.length?S.ledger.at(-1).hash:Z,no=S.ledger.length;S.ledger.push({no,tur,veri,o,hash:await sha(JSON.stringify({no,tur,veri,o}))})}
+async function verify(){let o=Z;for(const k of S.ledger){if(k.o!=o||k.hash!=await sha(JSON.stringify({no:k.no,tur:k.tur,veri:k.veri,o:k.o})))return false;o=k.hash}return true}
+
+// ---- kayıt: ham kişisel veri saklanmaz, hiçbir yerde gösterilmez ----
+async function kayit(f){
+  if(Object.entries(f).some(([k,v])=>k!='gun'&&!String(v).trim()))throw 'Tüm alanlar zorunludur.';
+  if((Date.now()-new Date(f.dogum))/31557600000<18)throw 'Kayıt için 18 yaş ve üzeri olmak gerekir.';
+  if(S.users.some(u=>norm(u.takma)==norm(f.takma)))throw 'Bu takma ad kullanılıyor.';
+  const kim=await sha(S.tuz+'|'+norm(f.ad)+'|'+norm(f.soyad)+'|'+f.dogum);
+  if(S.users.some(u=>u.kim==kim))throw 'Bu kişi için zaten bir hesap var (çoklu hesap engeli).';
+  const adr=await sha(S.tuz+'|'+norm(f.il)+'|'+norm(f.ilce)+'|'+norm(f.adres));
+  const u={id:S.n++,takma:f.takma.trim(),kim,adr,il:norm(f.il),gun:f.gun??Math.floor(Date.now()/864e5),kredi:20,gec:{}};
+  S.users.push(u);if(!S.cur)S.cur=u.id;
+  await led('KAYIT',{takma:u.takma});save();return u}
+async function kayitForm(){
+  const g=i=>$('#r_'+i).value;
+  await kayit({ad:g('ad'),soyad:g('soyad'),dogum:g('dogum'),il:g('il'),ilce:g('ilce'),adres:g('adres'),takma:g('takma')});
+  toast('Kayıt tamam. Bilgiler ham halde saklanmadı.');render()}
+async function demo(){
+  const k=(ad,il,ilce,adr,t,gun)=>kayit({ad,soyad:'Demo',dogum:'1995-03-14',il,ilce,adres:adr,takma:t,gun});
+  for(let i=1;i<=5;i++)await k('A'+i,'Ankara','Çankaya','Sokak '+i,'ankarali'+i,i*2);
+  for(let i=1;i<=10;i++)await k('I'+i,'İstanbul','Kadıköy','Cadde '+i,'istanbullu'+i,20+i*2);
+  for(let i=1;i<=6;i++)await k('B'+i,'İstanbul','Esenyurt','Sahte Sk. 1','bot'+i,60);
+  S.tab='konu';toast('Demo: 5 Ankaralı, 10 İstanbullu, 6 sahte hesap eklendi.');render()}
+
+// ---- konu / tartışma / silme ----
+async function konuAc(){
+  const u=cur();if(!u)throw 'Önce kayıt olun.';
+  const b=$('#t_b').value.trim(),a=$('#t_a').value.trim(),il=norm($('#t_il').value);
+  if(!b)throw 'Başlık gerekli.';
+  const kap=il||'ULUSAL',tid=S.n++,vid=S.n++;
+  S.topics.push({id:tid,baslik:b,acik:a,kapsam:kap,durum:'OYLAMADA',vote:vid,yorumlar:[]});
+  S.votes.push({id:vid,tur:'KONU',kapsam:kap,baslik:b,hedef:{t:tid},oylar:{},durum:'ACIK'});
+  await led('OYLAMA_ACILDI',{oylama:vid,tur:'KONU',kapsam:kap,baslik:b});save();render()}
+async function yorum(tid){
+  const u=cur(),m=$('#c'+tid).value.trim();if(!u||!m)throw 'Yorum boş olamaz.';
+  const t=gt(tid),id=S.n++,yz=norm(m).split(/[^a-zçğıöşü]+/).some(w=>HK.includes(w))?['HAKARET']:[];
+  t.yorumlar.push({id,yazar:u.takma,metin:m,gizli:null,yz});
+  await led('TARTISMA',{id,konu:tid,yazar:u.takma,icerik_hash:(await sha(m)).slice(0,16),yz_isaret:yz});save();render()}
+async function silmeOner(tid,cid){
+  const k=$('#k'+cid).value,t=gt(tid);
+  if(KAT[k]===0)throw `"${k}" bir silme gerekçesi olamaz: eleştirel ve popüler olmayan görüşler korunur.`;
+  if(S.votes.some(v=>v.tur=='SILME'&&v.hedef.c==cid&&v.durum=='ACIK'))throw 'Bu yorum için açık bir silme oylaması var.';
+  const vid=S.n++;
+  S.votes.push({id:vid,tur:'SILME',kapsam:t.kapsam,baslik:'Yorum #'+cid+' gizlensin ('+k+')',hedef:{t:tid,c:cid,k},oylar:{},durum:'ACIK'});
+  await led('OYLAMA_ACILDI',{oylama:vid,tur:'SILME',kategori:k,yorum:cid});save();render()}
+
+// ---- oylama ----
+function oyVer(vid,evet){
+  const v=gv(vid),u=cur();if(!u)throw 'Önce kullanıcı seçin.';
+  if(v.durum!='ACIK')throw 'Oylama kapalı.';
+  if(!sec(u,v.kapsam))throw `${u.takma} bu oylamada oy kullanamaz. Kapsam: ${tr(v.kapsam)}.`;
+  if(v.oylar[u.id])throw 'Bu oylamada zaten oy kullandınız.';
+  const y=+$('#y'+vid).value,m=y*y;
+  if(u.kredi<m)throw 'Oy krediniz yetersiz.';
+  u.kredi-=m;v.oylar[u.id]={evet,y,ger:$('#g'+vid).value.trim(),m};save();render()}
+function bz(a,b){let p=0;if(a.adr==b.adr)p+=40;if(Math.abs(a.gun-b.gun)<=1)p+=20;
+  const o=Object.keys(a.gec).filter(k=>k in b.gec);
+  if(o.length>=3&&o.filter(k=>a.gec[k]==b.gec[k]).length/o.length>=.95)p+=40;return p}
+function kume(sm,vo){ // n kişilik bağlı küme: toplam güç = karekök(n)
+  const p={};sm.forEach(u=>p[u.id]=u.id);
+  const f=x=>{while(p[x]!=x){p[x]=p[p[x]];x=p[x]}return x};
+  for(let i=0;i<sm.length;i++)for(let j=i+1;j<sm.length;j++)if(bz(sm[i],sm[j])>=60)p[f(sm[i].id)]=f(sm[j].id);
+  const g={};vo.forEach(id=>(g[f(id)]??=[]).push(id));
+  const w={},sup=[];
+  Object.values(g).forEach(a=>{a.forEach(id=>w[id]=1/Math.sqrt(a.length));if(a.length>=3)sup.push(a.length)});
+  return{w,sup}}
+async function kapat(vid){
+  const v=gv(vid);if(v.durum!='ACIK')return;
+  const sm=S.users.filter(u=>sec(u,v.kapsam)),ids=Object.keys(v.oylar).map(Number),{w,sup}=kume(sm,ids);
+  let e=0,h=0,he=0,hh=0;
+  ids.forEach(id=>{const o=v.oylar[id],g=o.y*w[id];if(o.evet){e+=g;he++}else{h+=g;hh++}});
+  const kat=ids.length/Math.max(1,sm.length),oran=e+h?e/(e+h):0;
+  const esik=v.tur=='KONU'?.5:2/3,mk=v.tur=='KONU'?.1:.2;
+  const s=kat<mk?'GECERSIZ_KATILIM_YETERSIZ':oran>esik?'KABUL':'RED';
+  v.serh=ids.map(id=>v.oylar[id]).filter(o=>o.ger&&o.evet!=(s=='KABUL')).map(o=>o.ger); // muhalefet şerhi
+  v.detay={e:+e.toFixed(2),h:+h.toFixed(2),he,hh,oran:+oran.toFixed(3),esik:+esik.toFixed(3),kat:+kat.toFixed(2),sup};
+  v.sonuc=s;v.durum='KAPALI';
+  ids.forEach(id=>S.users.find(u=>u.id==id).gec[vid]=v.oylar[id].evet);
+  const an=await Promise.all(ids.map(async id=>(await sha(S.tuz+'|'+id+'|'+vid)).slice(0,10)+':'+(v.oylar[id].evet?'E':'H')+v.oylar[id].y));
+  if(v.tur=='KONU')gt(v.hedef.t).durum=s=='KABUL'?'KABUL':'REDDEDILDI_ARSIV'; // red de olsa arşivde kalır
+  else if(s=='KABUL')gt(v.hedef.t).yorumlar.find(c=>c.id==v.hedef.c).gizli=v.hedef.k; // defterde kalır
+  await led('SONUC',{oylama:vid,tur:v.tur,sonuc:s,detay:v.detay,oylar:an.sort(),serhler:v.serh});save();render()}
+function otoOy(vid){ // demo: sahte çoğunluk senaryosu
+  const v=gv(vid),by=t=>S.users.find(u=>u.takma==t);
+  for(const u of S.users){
+    let ev=null;
+    if(u.takma.startsWith('bot'))ev=true;
+    else if(u.takma.startsWith('istanbullu'))ev=+u.takma.slice(10)<=3;
+    if(ev===null||v.oylar[u.id])continue;
+    u.kredi--;v.oylar[u.id]={evet:ev,y:1,m:1,ger:ev?'':'Mahremiyet riskleri çözülmeden zorunlu olamaz.'}}
+  save();render()}
+
+// ---- arayüz ----
+function VP(v){
+  const u=cur(),d=v.detay;
+  let h=`<div class="vp"><div class="m">${v.tur=='KONU'?'Konu kabulü (basit çoğunluk, eşik %50)':'Silme oylaması (2/3 eşik)'} · ${tr(v.kapsam)}</div><b>${esc(v.baslik)}</b>`;
+  if(v.durum=='ACIK'){
+    const uygun=u&&sec(u,v.kapsam);
+    h+=`<div class="m">${Object.keys(v.oylar).length} oy verildi. Ara sonuç oylama kapanana kadar gizli.</div>`;
+    if(u)h+=`<div class="m">${uygun?'Bu oylamada oy hakkınız var.':'Bu oylamada oy hakkınız yok (kapsam dışı).'}</div>`;
+    h+=`<div class="row"><select id="y${v.id}"><option value="1">Yoğunluk 1 (1 kredi)</option><option value="2">Yoğunluk 2 (4 kredi)</option><option value="3">Yoğunluk 3 (9 kredi)</option></select>
+    <input id="g${v.id}" placeholder="Gerekçe / şerh (isteğe bağlı)">
+    <button class="p" onclick="run(()=>oyVer(${v.id},true))">Evet</button><button onclick="run(()=>oyVer(${v.id},false))">Hayır</button>
+    <button onclick="run(()=>kapat(${v.id}))">Oylamayı kapat</button>`;
+    if(v.tur=='KONU'&&v.kapsam=='ULUSAL'&&S.users.some(x=>x.takma=='bot1'))h+=`<button onclick="otoOy(${v.id})">Demo: sahte çoğunluk senaryosunu oyla</button>`;
+    h+='</div>';
+  }else{
+    const ok=v.sonuc=='KABUL';
+    h+=`<div class="row"><span class="b ${ok?'ok':'bad'}">${v.sonuc.replace(/_/g,' ')}</span></div>
+    <div class="m">Ham oy: ${d.he} evet / ${d.hh} hayır · Ağırlıklı: ${d.e} evet / ${d.h} hayır · Evet oranı ${d.oran} (eşik ${d.esik}) · Katılım ${d.kat}</div>`;
+    if(d.sup.length)h+=`<div class="m bad">YZ uyarısı: koordinasyon şüphesi, küme boyutları ${d.sup.join(', ')}. Bu hesapların oyu azaltıldı.</div>`;
+    (v.serh||[]).forEach(s=>h+=`<div class="m">Muhalefet şerhi: “${esc(s)}”</div>`);
+  }
+  return h+'</div>'}
+function C(t,c){
+  let h=`<div class="cm"><span class="m">${esc(c.yazar)}</span> `;
+  if(c.yz.length)h+=`<span class="b bad">YZ: ${c.yz[0]} şüphesi (sadece uyarı)</span>`;
+  h+=c.gizli?`<div class="hide">[İçerik gizlendi: ${c.gizli}. Kayıt defterde duruyor.]</div>`:`<div>${esc(c.metin)}</div>`;
+  if(!c.gizli)h+=`<div class="row"><select id="k${c.id}">${Object.keys(KAT).map(k=>`<option>${k}</option>`).join('')}</select><button onclick="run(()=>silmeOner(${t.id},${c.id}))">Silme oylaması öner</button></div>`;
+  S.votes.filter(v=>v.tur=='SILME'&&v.hedef.c==c.id).forEach(v=>h+=VP(v));
+  return h+'</div>'}
+function T(t){
+  const cls=t.durum=='KABUL'?'ok':t.durum=='OYLAMADA'?'':'bad';
+  return `<div class="card"><div class="row"><b>${esc(t.baslik)}</b><span class="b ${cls}">${t.durum.replace(/_/g,' ')}</span><span class="b">${tr(t.kapsam)}</span></div>
+  <p>${esc(t.acik)}</p>${VP(gv(t.vote))}<h4>Tartışma</h4>${t.yorumlar.map(c=>C(t,c)).join('')||'<p class="m">Henüz yorum yok.</p>'}
+  <textarea id="c${t.id}" placeholder="Yorum yaz (tartışmalar silinemez, sadece gizlenebilir ve kaydı kalır)"></textarea><button onclick="run(()=>yorum(${t.id}))">Gönder</button></div>`}
+function panel(){
+  if(S.tab=='kisi')return `<div class="card"><b>Kayıt</b><p class="m">Ad, soyad, doğum tarihi ve adres istenir ama ham haliyle saklanmaz ve hiçbir ekranda görünmez. Sadece geri döndürülemez özet (hash) ve il bilgisi tutulur. Dışarıya yalnızca takma ad görünür.</p>
+    <div class="g"><input id="r_ad" placeholder="Ad"><input id="r_soyad" placeholder="Soyad"><input id="r_dogum" type="date"><input id="r_il" placeholder="İl (örn. Ankara)"><input id="r_ilce" placeholder="İlçe"><input id="r_adres" placeholder="Açık adres"><input id="r_takma" placeholder="Takma ad"></div>
+    <p><button class="p" onclick="run(kayitForm)">Kayıt ol</button> <button onclick="run(demo)">Demo verisi yükle</button> <button onclick="if(confirm('Tüm veri silinsin mi?')){S=fresh();save();render()}">Sıfırla</button></p></div>
+    <div class="card"><b>Kullanıcılar (${S.users.length})</b><div class="row">${S.users.map(u=>`<span class="b">${esc(u.takma)} · ${u.kredi} kredi</span>`).join('')||'<span class="m">Henüz kullanıcı yok.</span>'}</div></div>`;
+  if(S.tab=='konu')return `<div class="card"><b>Yeni konu aç</b><input id="t_b" placeholder="Başlık" style="width:100%;margin:6px 0"><textarea id="t_a" placeholder="Açıklama"></textarea>
+    <div class="row"><input id="t_il" placeholder="Bölgesel ise il adı (boş bırak = ulusal)"><button class="p" onclick="run(konuAc)">Konuyu oylamaya sun</button></div>
+    <p class="m">Bölgesel konuda yalnızca o ilin sakinleri oy verebilir, ulusal konuda herkes verebilir.</p></div>${S.topics.map(T).join('')||'<p class="m">Henüz konu yok.</p>'}`;
+  return `<div class="card"><b>Defter (hash zinciri, ${S.ledger.length} kayıt)</b><p class="m">Her kayıt öncekinin hash'ini taşır. Kişisel veri deftere yazılmaz.</p>
+    <button class="p" onclick="run(async()=>toast((await verify())?'Zincir geçerli.':'ZİNCİR BOZUK: kayıtlar değiştirilmiş!'))">Zinciri doğrula</button>
+    <button onclick="if(S.ledger.length>1){S.ledger[1].veri={degistirildi:true};toast('Bir kayıt gizlice değiştirildi. Şimdi doğrulayın.')}">Bir kaydı gizlice boz (demo)</button>
+    ${S.ledger.slice().reverse().map(k=>`<div class="led">#${k.no} ${k.tur} · ${esc(JSON.stringify(k.veri))}<br>hash ${k.hash.slice(0,20)}…</div>`).join('')}</div>`}
+function render(){
+  const u=cur();
+  $('#app').innerHTML=`<h1>🗳️ Oylamalı Konu Platformu</h1>
+  <div class="row">${S.users.length?`<span class="m">Aktif kullanıcı:</span><select onchange="S.cur=+this.value;save();render()">${S.users.map(x=>`<option value="${x.id}" ${x.id==S.cur?'selected':''}>${esc(x.takma)}</option>`).join('')}</select><span class="b">${u?u.kredi:0} oy kredisi</span>`:'<span class="m">Başlamak için kayıt olun veya demo verisini yükleyin.</span>'}</div>
+  <div class="tabs">${[['kisi','Kayıt'],['konu','Konular'],['defter','Defter']].map(([k,n])=>`<button class="${S.tab==k?'on':''}" onclick="S.tab='${k}';save();render()">${n}</button>`).join('')}</div>${panel()}`}
+render();
+</script>
+</body>
+</html>
